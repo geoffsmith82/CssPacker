@@ -24,11 +24,18 @@ type
 
 implementation
 
-class function TCSSTools.FormatCSS2(const Buffer: string; Mode: TCssFormatMode): string;
+class function TCSSTools.FormatCSS2(
+  const Buffer: string;
+  Mode: TCssFormatMode
+): string;
 type
   TState = (stNormal, stString, stComment, stURL, stCalc);
 const
   Delims: set of Char = ['{', '}', ':', ';', ',', '>'];
+  LengthUnits: array[0..12] of string = (
+    'px','em','rem','%','vh','vw','vmin','vmax',
+    'cm','mm','in','pt','pc'
+  );
 var
   SB: TStringBuilder;
   I, Indent: Integer;
@@ -37,27 +44,9 @@ var
   Quote: Char;
   PrevWasSpace: Boolean;
 
-  function IsDelimiter(Ch: Char): Boolean; inline;
-  begin
-    Result := CharInSet(Ch, Delims);
-  end;
-
-  function PeekWord(StartIdx: Integer): string;
-  var
-    J: Integer;
-  begin
-    Result := '';
-    J := StartIdx;
-    while (J <= Length(Buffer)) and Buffer[J].IsLetter do
-    begin
-      Result := Result + Buffer[J];
-      Inc(J);
-    end;
-  end;
-
   function NextNonWhitespace(Index: Integer): Char;
   begin
-    while (Index <= Length(Buffer)) and Buffer[Index].IsWhiteSpace do
+    while (Index <= Length(Buffer)) and TCharacter.IsWhiteSpace(Buffer[Index]) do
       Inc(Index);
     if Index <= Length(Buffer) then
       Result := Buffer[Index]
@@ -65,9 +54,60 @@ var
       Result := #0;
   end;
 
-  procedure AppendIndent;
+  function SkipWhitespace(Index: Integer): Integer;
+  begin
+    Result := Index;
+    while (Result <= Length(Buffer)) and TCharacter.IsWhiteSpace(Buffer[Result]) do
+      Inc(Result);
+  end;
+
+  function MatchLengthUnit(StartIdx: Integer; out UnitLen: Integer): Boolean;
   var
-    J: Integer;
+    U: string;
+  begin
+    for U in LengthUnits do
+      if SameText(Copy(Buffer, StartIdx, Length(U)), U) then
+      begin
+        UnitLen := Length(U);
+        Exit(True);
+      end;
+    Result := False;
+  end;
+
+  function IsStandaloneZero(Index: Integer): Boolean;
+  begin
+    if Buffer[Index] <> '0' then Exit(False);
+    if (Index > 1) and (Buffer[Index - 1] in ['0'..'9', '.']) then Exit(False);
+    Result := True;
+  end;
+
+  function IsLeadingZeroDecimal(Index: Integer): Boolean;
+  begin
+    Result :=
+      (Index < Length(Buffer)) and
+      (Buffer[Index] = '0') and
+      (Buffer[Index + 1] = '.') and
+      ((Index = 1) or not (Buffer[Index - 1] in ['0'..'9']));
+  end;
+
+  function TryShortenHex(Index: Integer; out Short: string): Integer;
+  var
+    Hex: string;
+  begin
+    Result := 0;
+    if (Index + 6 <= Length(Buffer)) then
+    begin
+      Hex := Copy(Buffer, Index + 1, 6);
+      if (Hex[1] = Hex[2]) and (Hex[3] = Hex[4]) and (Hex[5] = Hex[6]) then
+      begin
+        Short := '#' + Hex[1] + Hex[3] + Hex[5];
+        Result := 7;
+      end;
+    end;
+  end;
+
+  procedure AppendIndent;
+  var J: Integer;
   begin
     for J := 1 to Indent do
       SB.Append('  ');
@@ -85,28 +125,21 @@ begin
     while I <= Length(Buffer) do
     begin
       C := Buffer[I];
-      Next := #0;
-      if I < Length(Buffer) then
-        Next := Buffer[I + 1];
+      if I < Length(Buffer) then Next := Buffer[I + 1] else Next := #0;
 
       case State of
         stNormal:
           begin
-            { Remove @charset in Bootstrap mode }
-            if (Mode = cssPackBootstrap) and (C = '@') then
+            (* Drop @charset in Bootstrap *)
+            if (Mode = cssPackBootstrap) and (C = '@') and
+               SameText(Copy(Buffer, I+1, 7), 'charset') then
             begin
-              var W := PeekWord(I + 1);
-              if SameText(W, 'charset') then
-              begin
-                Inc(I, Length(W) + 1);
-                while (I <= Length(Buffer)) and (Buffer[I] <> ';') do
-                  Inc(I);
-                Inc(I);
-                Continue;
-              end;
+              while (I <= Length(Buffer)) and (Buffer[I] <> ';') do Inc(I);
+              Inc(I);
+              Continue;
             end;
 
-            { Comment }
+            (* Comments *)
             if (C = '/') and (Next = '*') then
             begin
               State := stComment;
@@ -114,7 +147,7 @@ begin
               Continue;
             end;
 
-            { String }
+            (* Strings *)
             if (C = '''') or (C = '"') then
             begin
               State := stString;
@@ -125,25 +158,62 @@ begin
               Continue;
             end;
 
-            { Detect url( / calc( }
-            if C.IsLetter then
+            (* Detect url()/calc() *)
+            if SameText(Copy(Buffer, I, 4), 'url(') then
             begin
-              var W := PeekWord(I);
-              if W <> '' then
+              State := stURL;
+              SB.Append('url(');
+              Inc(I, 4);
+              Continue;
+            end;
+
+            if SameText(Copy(Buffer, I, 5), 'calc(') then
+            begin
+              State := stCalc;
+              SB.Append('calc(');
+              Inc(I, 5);
+              Continue;
+            end;
+
+            (* Bootstrap-only lexical optimisations *)
+            if Mode = cssPackBootstrap then
+            begin
+              (* Hex colour shortening *)
+              if C = '#' then
               begin
-                var K := I + Length(W);
-                if (K <= Length(Buffer)) and (Buffer[K] = '(') then
+                var Short: string;
+                var Used := TryShortenHex(I, Short);
+                if Used > 0 then
                 begin
-                  if SameText(W, 'url') then
-                    State := stURL
-                  else if SameText(W, 'calc') then
-                    State := stCalc;
+                  SB.Append(Short);
+                  Inc(I, Used);
+                  Continue;
+                end;
+              end;
+
+              (* Leading zero decimal *)
+              if IsLeadingZeroDecimal(I) then
+              begin
+                SB.Append('.');
+                Inc(I, 2);
+                Continue;
+              end;
+
+              (* Zero-length unit *)
+              if IsStandaloneZero(I) then
+              begin
+                var UL: Integer;
+                if MatchLengthUnit(I + 1, UL) then
+                begin
+                  SB.Append('0');
+                  Inc(I, UL + 1);
+                  Continue;
                 end;
               end;
             end;
 
-            { Whitespace }
-            if C.IsWhiteSpace then
+            (* Whitespace *)
+            if TCharacter.IsWhiteSpace(C) then
             begin
               if Mode = cssUnpackPretty then
                 Inc(I)
@@ -158,32 +228,7 @@ begin
               Continue;
             end;
 
-            { SAFE MODE: canonical colon spacing }
-            if (Mode = cssPackSafe) and (C = ':') then
-            begin
-              SB.Append(': ');
-              Inc(I);
-              while (I <= Length(Buffer)) and Buffer[I].IsWhiteSpace do
-                Inc(I);
-              PrevWasSpace := False;
-              Continue;
-            end;
-
-            (* SAFE MODE: ensure final semicolon before '}' *)
-            if (Mode = cssPackSafe) and (C = '}') then
-            begin
-              if SB.Length > 0 then
-              begin
-                var J := SB.Length - 1;
-                while (J >= 0) and SB.Chars[J].IsWhiteSpace do
-                  Dec(J);
-
-                if (J >= 0) and (SB.Chars[J] <> ';') and (SB.Chars[J] <> '{') then
-                  SB.Insert(J + 1, ';');
-              end;
-            end;
-
-            { Pretty / Safe structural handling }
+            (* Structural handling *)
             if Mode <> cssPackBootstrap then
             begin
               if C = '{' then
@@ -209,8 +254,6 @@ begin
                   SB.Append(sLineBreak);
                   AppendIndent;
                   SB.Append('}');
-                  SB.Append(sLineBreak);
-                  AppendIndent;
                 end
                 else
                   SB.Append('}');
@@ -233,47 +276,43 @@ begin
               end;
             end;
 
-            { Bootstrap delimiter tightening }
-            if (Mode = cssPackBootstrap) and IsDelimiter(C) then
+            (* Bootstrap delimiter tightening *)
+            if (Mode = cssPackBootstrap) and (C in Delims) then
             begin
-              { Drop final semicolon }
               if (C = ';') and (NextNonWhitespace(I + 1) = '}') then
               begin
-                Inc(I);
-                PrevWasSpace := False;
+                I := SkipWhitespace(I + 1);
                 Continue;
               end;
 
-              (* Trim space before '}' *)
-              if (C = '}') and (SB.Length > 0) and (SB.Chars[SB.Length - 1] = ' ') then
-                SB.Length := SB.Length - 1;
-
-              { Trim space before delimiter }
               if (SB.Length > 0) and (SB.Chars[SB.Length - 1] = ' ') then
                 SB.Length := SB.Length - 1;
 
               SB.Append(C);
               Inc(I);
-              while (I <= Length(Buffer)) and Buffer[I].IsWhiteSpace do
+              while (I <= Length(Buffer)) and TCharacter.IsWhiteSpace(Buffer[I]) do
                 Inc(I);
-
               PrevWasSpace := False;
               Continue;
             end;
 
             SB.Append(C);
             PrevWasSpace := False;
+            Inc(I);
+          end;
+
+        stCalc, stURL:
+          begin
+            SB.Append(C);
+            Inc(I);
+            if C = ')' then
+              State := stNormal;
           end;
 
         stString:
           begin
             SB.Append(C);
-            if (C = '\') and (Next <> #0) then
-            begin
-              SB.Append(Next);
-              Inc(I, 2);
-              Continue;
-            end;
+            Inc(I);
             if C = Quote then
               State := stNormal;
           end;
@@ -284,33 +323,26 @@ begin
             begin
               State := stNormal;
               Inc(I, 2);
-              Continue;
-            end;
-          end;
-
-        stURL, stCalc:
-          begin
-            SB.Append(C);
-            if C = ')' then
-              State := stNormal;
+            end
+            else
+              Inc(I);
           end;
       end;
-
-      Inc(I);
     end;
 
-    Result := SB.ToString.Trim;
+    if Mode = cssUnpackPretty then
+    begin
+      Result := SB.ToString;
+      if not Result.EndsWith(sLineBreak) then
+        Result := Result + sLineBreak;
+    end
+    else
+      Result := SB.ToString.Trim;
+
   finally
     SB.Free;
   end;
 end;
 
-function Spaces(count: Integer):string;
-var
-  i: Integer;
-begin
-  for i := 0 to count -1 do
-    Result := Result + ' ';
-end;
 
 end.
