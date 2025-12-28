@@ -113,6 +113,50 @@ var
       SB.Append('  ');
   end;
 
+  procedure BootstrapOptimiseAt(var Index: Integer);
+  begin
+    (* Hex colour shortening *)
+    if Buffer[Index] = '#' then
+    begin
+      var Short: string;
+      var Used := TryShortenHex(Index, Short);
+      if Used > 0 then
+      begin
+        SB.Append(Short);
+        Inc(Index, Used);
+        Exit;
+      end;
+    end;
+
+    (* 0.5 -> .5 *)
+    if IsLeadingZeroDecimal(Index) then
+    begin
+      SB.Append('.');
+      Inc(Index, 2);
+      Exit;
+    end;
+
+    (* 0px -> 0 (length units only) *)
+    if IsStandaloneZero(Index) then
+    begin
+      var UL: Integer;
+      if MatchLengthUnit(Index + 1, UL) then
+      begin
+        SB.Append('0');
+        Inc(Index, UL + 1);
+
+        (* Preserve token boundaries *)
+        if (Index <= Length(Buffer)) and TCharacter.IsWhiteSpace(Buffer[Index]) then
+        begin
+          SB.Append(' ');
+          Index := SkipWhitespace(Index);
+        end;
+
+        Exit;
+      end;
+    end;
+  end;
+
 begin
   SB := TStringBuilder.Create(Length(Buffer));
   try
@@ -132,7 +176,7 @@ begin
           begin
             (* Drop @charset in Bootstrap *)
             if (Mode = cssPackBootstrap) and (C = '@') and
-               SameText(Copy(Buffer, I+1, 7), 'charset') then
+               SameText(Copy(Buffer, I + 1, 7), 'charset') then
             begin
               while (I <= Length(Buffer)) and (Buffer[I] <> ';') do Inc(I);
               Inc(I);
@@ -175,41 +219,26 @@ begin
               Continue;
             end;
 
-            (* Bootstrap-only lexical optimisations *)
+            (* Pretty: conditional colon spacing *)
+            if (Mode = cssUnpackPretty) and (C = ':') then
+            begin
+              SB.Append(':');
+              Inc(I);
+              while (I <= Length(Buffer)) and TCharacter.IsWhiteSpace(Buffer[I]) do
+                Inc(I);
+              if SameText(Copy(Buffer, I, 4), 'url(') or
+                 SameText(Copy(Buffer, I, 5), 'calc(') then
+                SB.Append(' ');
+              Continue;
+            end;
+
+            (* Bootstrap lexical optimisations *)
             if Mode = cssPackBootstrap then
             begin
-              (* Hex colour shortening *)
-              if C = '#' then
-              begin
-                var Short: string;
-                var Used := TryShortenHex(I, Short);
-                if Used > 0 then
-                begin
-                  SB.Append(Short);
-                  Inc(I, Used);
-                  Continue;
-                end;
-              end;
-
-              (* Leading zero decimal *)
-              if IsLeadingZeroDecimal(I) then
-              begin
-                SB.Append('.');
-                Inc(I, 2);
+              var Before := I;
+              BootstrapOptimiseAt(I);
+              if I <> Before then
                 Continue;
-              end;
-
-              (* Zero-length unit *)
-              if IsStandaloneZero(I) then
-              begin
-                var UL: Integer;
-                if MatchLengthUnit(I + 1, UL) then
-                begin
-                  SB.Append('0');
-                  Inc(I, UL + 1);
-                  Continue;
-                end;
-              end;
             end;
 
             (* Whitespace *)
@@ -301,7 +330,23 @@ begin
             Inc(I);
           end;
 
-        stCalc, stURL:
+        stCalc:
+          begin
+            if Mode = cssPackBootstrap then
+            begin
+              var Before := I;
+              BootstrapOptimiseAt(I);
+              if I <> Before then
+                Continue;
+            end;
+
+            SB.Append(C);
+            Inc(I);
+            if C = ')' then
+              State := stNormal;
+          end;
+
+        stURL:
           begin
             SB.Append(C);
             Inc(I);
