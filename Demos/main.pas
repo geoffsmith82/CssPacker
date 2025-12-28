@@ -30,7 +30,7 @@ type
     chkClipabord: TCheckBox;
     cmdAbout: TButton;
     cmdExit: TButton;
-    CheckBox1: TCheckBox;
+    chkBackupOriginalFile: TCheckBox;
     chkIndent: TCheckBox;
     shpHeader: TShape;
     lblOptions: TLabel;
@@ -93,22 +93,16 @@ begin
   end;
 
   //Check if we need to make a backup of original file.
-  if chkClipabord.Checked then
+  if chkBackupOriginalFile.Checked then
   begin
-    copyfile(PChar(lzfile), PChar(lzfile + '.bak'), True);
+    Copyfile(PChar(lzfile), PChar(lzfile + '.bak'), True);
   end;
 
-  Buffer := TCSSTools.MinifyCSS(TFile.ReadAllText(lzfile));
+  Buffer := TCSSTools.FormatCSS2(TFile.ReadAllText(lzfile), cssPackBootstrap);
 
   //Save new file.
   try
-    //Assign file.
-    AssignFile(tf, lzfile);
-    Rewrite(tf);
-    //Write buffer to file.
-    Write(tf, Buffer);
-    //Close file.
-    CloseFile(tf);
+    TFile.WriteAllText(lzfile, Buffer);
     MessageDlg('File was successfully packed' + crlf + lzfile, mtInformation, [mbOK], 0);
     //Finish message.
   except

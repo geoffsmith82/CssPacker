@@ -7,7 +7,6 @@
 **Version**      : Version 1.0  
 **Author**       : Benjamin George  
 **Release Date** : August 30, 2015  
-**Type**         : Freeware  
 
 ---
 
