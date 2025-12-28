@@ -24,10 +24,7 @@ type
 
 implementation
 
-class function TCSSTools.FormatCSS2(
-  const Buffer: string;
-  Mode: TCssFormatMode
-): string;
+class function TCSSTools.FormatCSS2(const Buffer: string; Mode: TCssFormatMode): string;
 type
   TState = (stNormal, stString, stComment, stURL, stCalc);
 const
