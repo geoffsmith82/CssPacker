@@ -9,8 +9,6 @@ uses
 type
   [TestFixture]
   TCssFormatterTests = class
-  private
-
   public
     [Test] procedure Bootstrap_DropsCharset;
     [Test] procedure Bootstrap_DropsFinalSemicolon;
@@ -19,7 +17,7 @@ type
     [Test] procedure Bootstrap_DropsFinalSemicolon_PreservesCalc;
     [Test] procedure SafeMode_PreservesUrlData;
     [Test] procedure Pretty_UnpacksBlocks;
-    [Test] procedure RoundTrip_Pretty_Bootstrap_Pretty;
+    [Test] procedure RoundTrip_Pretty_Bootstrap_Safe;
     [Test] procedure Bootstrap_ZeroDeg_IsNotRemoved;
     [Test] procedure Bootstrap_ZeroInCalc_LengthUnitRemoved;
     [Test] procedure Bootstrap_ZeroLengthUnits_AreRemoved;
@@ -37,6 +35,8 @@ type
     [Test] procedure Bootstrap_DoesNotChangeNonZeroDecimal;
     [Test] procedure SafeMode_DoesNotRemoveLeadingZero;
     [Test] procedure PrettyMode_DoesNotRemoveLeadingZero;
+
+    [Test] procedure SafeMode_IsIdempotent;
   end;
 
 implementation
@@ -101,7 +101,7 @@ begin
   Assert.AreEqual(Expect, TCSSTools.FormatCSS2(Input, cssUnpackPretty));
 end;
 
-procedure TCssFormatterTests.RoundTrip_Pretty_Bootstrap_Pretty;
+procedure TCssFormatterTests.RoundTrip_Pretty_Bootstrap_Safe;
 const
   Input =
     '.a {' + sLineBreak +
@@ -109,13 +109,19 @@ const
     '  background: url(icon.svg);' + sLineBreak +
     '}' + sLineBreak;
 var
-  Pretty1, Bootstrap, Pretty2: string;
+  Pretty, Bootstrap, Safe1, Safe2: string;
 begin
-  Pretty1 := Input;
-  Bootstrap := TCSSTools.FormatCSS2(Pretty1, cssPackBootstrap);
-  Pretty2 := TCSSTools.FormatCSS2(Bootstrap, cssUnpackPretty);
+  (* Original pretty input *)
+  Pretty := Input;
 
-  Assert.AreEqual(TCSSTools.FormatCSS2(Pretty1, cssPackSafe), TCSSTools.FormatCSS2(Pretty2, cssPackSafe));
+  (* Minify / optimise *)
+  Bootstrap := TCSSTools.FormatCSS2(Pretty, cssPackBootstrap);
+
+  (* Canonicalise both sides *)
+  Safe1 := TCSSTools.FormatCSS2(Pretty, cssPackSafe);
+  Safe2 := TCSSTools.FormatCSS2(Bootstrap, cssPackSafe);
+
+  Assert.AreEqual(Safe1, Safe2);
 end;
 
 procedure TCssFormatterTests.Bootstrap_ZeroPx_IsRemoved;
@@ -270,7 +276,24 @@ begin
   );
 end;
 
+procedure TCssFormatterTests.SafeMode_IsIdempotent;
+const
+  InputCSS =
+    '.a {' +
+    '  width: calc(100% - 20px);' +
+    '  background: url(data:image/svg+xml;utf8,<svg viewBox="0 0 10 10">);' +
+    '  margin: 0px;' +
+    '  opacity: 0.5;' +
+    '}';
+var
+  Once, Twice: string;
+begin
+  Once  := TCSSTools.FormatCSS2(InputCSS, cssPackSafe);
+  Twice := TCSSTools.FormatCSS2(Once, cssPackSafe);
 
+  Assert.AreEqual(Once, Twice,
+    'Safe(Safe(X)) must equal Safe(X)');
+end;
 
 
 initialization

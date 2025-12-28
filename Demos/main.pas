@@ -184,7 +184,7 @@ begin
     copyfile(PChar(lzfile), PChar(lzfile + '.bak'), True);
   end;
 
-  Buffer := TCSSTools.FormatCSS(TFile.ReadAllText(lzfile), indentSpaces);
+  Buffer := TCSSTools.FormatCSS2(TFile.ReadAllText(lzfile), cssPackBootstrap);//, indentSpaces);
 
   //Save new file.
   try
