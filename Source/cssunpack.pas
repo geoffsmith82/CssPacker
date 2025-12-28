@@ -5,84 +5,307 @@ interface
 uses
    System.SysUtils
   , System.Classes
+  , System.StrUtils
+  , System.Character
   ;
 
 type
+  TCssFormatMode = (
+    cssPackSafe,        // Never break semantics
+    cssPackBootstrap,   // Matches Bootstrap-style minification
+    cssUnpackPretty     // Readable, indented, stable output
+  );
+
   TCSSTools = class
-  private
-    class function RemakeCommas(StrLine: string):string ; static;
-    class function RemoveSpacesOnEitherSideOfChar(Buffer: string; var StrLine: string; AxisChar: Char): String;
   public
-    class function FormatCSS(Buffer: string; IndentSpaces: Integer = 0): String; static;
-    class function MinifyCSS(Buffer: string): String; static;
+    class function FormatCSS2(const Buffer: string; Mode: TCssFormatMode): string;
   end;
 
 
 implementation
 
-class function TCSSTools.MinifyCSS(Buffer: string): String;
+class function TCSSTools.FormatCSS2(
+  const Buffer: string;
+  Mode: TCssFormatMode
+): string;
+type
+  TState = (stNormal, stString, stComment, stURL, stCalc);
+const
+  Delims: set of Char = ['{', '}', ':', ';', ',', '>'];
 var
-  i: Integer;
-  StrLine : String;
-  sl : TStringList;
-begin
-  sl := TStringList.Create;
-  sl.Text := Buffer;
-  for i := 0 to sl.Count - 1 do
+  SB: TStringBuilder;
+  I, Indent: Integer;
+  C, Next: Char;
+  State: TState;
+  Quote: Char;
+  PrevWasSpace: Boolean;
+
+  function IsDelimiter(Ch: Char): Boolean; inline;
   begin
-    sl[i] := Trim(sl[i]);
+    Result := CharInSet(Ch, Delims);
   end;
 
-  Buffer := sl.text;
-
-  Strline := Buffer.Replace(sLineBreak, '');
-
-  StrLine := RemoveSpacesOnEitherSideOfChar(Buffer, StrLine, ',');
-  StrLine := RemoveSpacesOnEitherSideOfChar(Buffer, StrLine, '{');
-  StrLine := RemoveSpacesOnEitherSideOfChar(Buffer, StrLine, '<');
-  StrLine := RemoveSpacesOnEitherSideOfChar(Buffer, StrLine, '>');
-  StrLine := RemoveSpacesOnEitherSideOfChar(Buffer, StrLine, ':');
-
-  Result := StrLine;
-end;
-
-class function TCSSTools.RemoveSpacesOnEitherSideOfChar(Buffer: string; var StrLine: string; AxisChar: Char): String;
-var
-  Local_i: Integer;
-  parts: TArray<string>;
-begin
-  parts := Strline.Split([AxisChar]);
-  if High(parts) > 1 then
+  function PeekWord(StartIdx: Integer): string;
+  var
+    J: Integer;
   begin
-    StrLine := '';
-    for Local_i := 0 to High(parts) do
+    Result := '';
+    J := StartIdx;
+    while (J <= Length(Buffer)) and Buffer[J].IsLetter do
     begin
-      StrLine := StrLine + parts[Local_i].Trim + AxisChar;
+      Result := Result + Buffer[J];
+      Inc(J);
     end;
   end;
-  if not Buffer.EndsWith(AxisChar) and StrLine.EndsWith(AxisChar) then
-    StrLine := StrLine.Remove(Strline.Length - 1);
-end;
 
-class function TCSSTools.RemakeCommas(StrLine: string): string;
-var
-  parts : TArray<string>;
-  i: Integer;
-begin
-  parts := Strline.Split([',']);
-
-  if High(parts) > 0 then
+  function NextNonWhitespace(Index: Integer): Char;
   begin
-    StrLine := '';
-    for i := 0 to High(parts) do
+    while (Index <= Length(Buffer)) and Buffer[Index].IsWhiteSpace do
+      Inc(Index);
+    if Index <= Length(Buffer) then
+      Result := Buffer[Index]
+    else
+      Result := #0;
+  end;
+
+  procedure AppendIndent;
+  var
+    J: Integer;
+  begin
+    for J := 1 to Indent do
+      SB.Append('  ');
+  end;
+
+begin
+  SB := TStringBuilder.Create(Length(Buffer));
+  try
+    State := stNormal;
+    Quote := #0;
+    PrevWasSpace := False;
+    Indent := 0;
+    I := 1;
+
+    while I <= Length(Buffer) do
     begin
-      StrLine := StrLine + parts[i].Trim + ', ';
+      C := Buffer[I];
+      Next := #0;
+      if I < Length(Buffer) then
+        Next := Buffer[I + 1];
+
+      case State of
+        stNormal:
+          begin
+            { Remove @charset in Bootstrap mode }
+            if (Mode = cssPackBootstrap) and (C = '@') then
+            begin
+              var W := PeekWord(I + 1);
+              if SameText(W, 'charset') then
+              begin
+                Inc(I, Length(W) + 1);
+                while (I <= Length(Buffer)) and (Buffer[I] <> ';') do
+                  Inc(I);
+                Inc(I);
+                Continue;
+              end;
+            end;
+
+            { Comment }
+            if (C = '/') and (Next = '*') then
+            begin
+              State := stComment;
+              Inc(I, 2);
+              Continue;
+            end;
+
+            { String }
+            if (C = '''') or (C = '"') then
+            begin
+              State := stString;
+              Quote := C;
+              SB.Append(C);
+              PrevWasSpace := False;
+              Inc(I);
+              Continue;
+            end;
+
+            { Detect url( / calc( }
+            if C.IsLetter then
+            begin
+              var W := PeekWord(I);
+              if W <> '' then
+              begin
+                var K := I + Length(W);
+                if (K <= Length(Buffer)) and (Buffer[K] = '(') then
+                begin
+                  if SameText(W, 'url') then
+                    State := stURL
+                  else if SameText(W, 'calc') then
+                    State := stCalc;
+                end;
+              end;
+            end;
+
+            { Whitespace }
+            if C.IsWhiteSpace then
+            begin
+              if Mode = cssUnpackPretty then
+                Inc(I)
+              else if not PrevWasSpace then
+              begin
+                SB.Append(' ');
+                PrevWasSpace := True;
+                Inc(I);
+              end
+              else
+                Inc(I);
+              Continue;
+            end;
+
+            { SAFE MODE: canonical colon spacing }
+            if (Mode = cssPackSafe) and (C = ':') then
+            begin
+              SB.Append(': ');
+              Inc(I);
+              while (I <= Length(Buffer)) and Buffer[I].IsWhiteSpace do
+                Inc(I);
+              PrevWasSpace := False;
+              Continue;
+            end;
+
+            (* SAFE MODE: ensure final semicolon before '}' *)
+            if (Mode = cssPackSafe) and (C = '}') then
+            begin
+              if SB.Length > 0 then
+              begin
+                var J := SB.Length - 1;
+                while (J >= 0) and SB.Chars[J].IsWhiteSpace do
+                  Dec(J);
+
+                if (J >= 0) and (SB.Chars[J] <> ';') and (SB.Chars[J] <> '{') then
+                  SB.Insert(J + 1, ';');
+              end;
+            end;
+
+            { Pretty / Safe structural handling }
+            if Mode <> cssPackBootstrap then
+            begin
+              if C = '{' then
+              begin
+                if Mode = cssUnpackPretty then
+                begin
+                  SB.Append(' {' + sLineBreak);
+                  Inc(Indent);
+                  AppendIndent;
+                end
+                else
+                  SB.Append('{');
+                PrevWasSpace := False;
+                Inc(I);
+                Continue;
+              end;
+
+              if C = '}' then
+              begin
+                if Mode = cssUnpackPretty then
+                begin
+                  Dec(Indent);
+                  SB.Append(sLineBreak);
+                  AppendIndent;
+                  SB.Append('}');
+                  SB.Append(sLineBreak);
+                  AppendIndent;
+                end
+                else
+                  SB.Append('}');
+                PrevWasSpace := False;
+                Inc(I);
+                Continue;
+              end;
+
+              if C = ';' then
+              begin
+                SB.Append(';');
+                if Mode = cssUnpackPretty then
+                begin
+                  SB.Append(sLineBreak);
+                  AppendIndent;
+                end;
+                PrevWasSpace := False;
+                Inc(I);
+                Continue;
+              end;
+            end;
+
+            { Bootstrap delimiter tightening }
+            if (Mode = cssPackBootstrap) and IsDelimiter(C) then
+            begin
+              { Drop final semicolon }
+              if (C = ';') and (NextNonWhitespace(I + 1) = '}') then
+              begin
+                Inc(I);
+                PrevWasSpace := False;
+                Continue;
+              end;
+
+              (* Trim space before '}' *)
+              if (C = '}') and (SB.Length > 0) and (SB.Chars[SB.Length - 1] = ' ') then
+                SB.Length := SB.Length - 1;
+
+              { Trim space before delimiter }
+              if (SB.Length > 0) and (SB.Chars[SB.Length - 1] = ' ') then
+                SB.Length := SB.Length - 1;
+
+              SB.Append(C);
+              Inc(I);
+              while (I <= Length(Buffer)) and Buffer[I].IsWhiteSpace do
+                Inc(I);
+
+              PrevWasSpace := False;
+              Continue;
+            end;
+
+            SB.Append(C);
+            PrevWasSpace := False;
+          end;
+
+        stString:
+          begin
+            SB.Append(C);
+            if (C = '\') and (Next <> #0) then
+            begin
+              SB.Append(Next);
+              Inc(I, 2);
+              Continue;
+            end;
+            if C = Quote then
+              State := stNormal;
+          end;
+
+        stComment:
+          begin
+            if (C = '*') and (Next = '/') then
+            begin
+              State := stNormal;
+              Inc(I, 2);
+              Continue;
+            end;
+          end;
+
+        stURL, stCalc:
+          begin
+            SB.Append(C);
+            if C = ')' then
+              State := stNormal;
+          end;
+      end;
+
+      Inc(I);
     end;
 
-    if StrLine.EndsWith(', ') then
-      StrLine := StrLine.Remove(StrLine.Length-2, 2);
+    Result := SB.ToString.Trim;
+  finally
+    SB.Free;
   end;
-  Result := StrLine;
 end;
 
 function Spaces(count: Integer):string;
@@ -91,91 +314,6 @@ var
 begin
   for i := 0 to count -1 do
     Result := Result + ' ';
-end;
-
-
-class function TCSSTools.FormatCSS(Buffer: string; IndentSpaces: Integer = 0): String;
-var
-  I: Integer;
-  StrLine: string;
-  sPos: Integer;
-  StrTemp: string;
-  sl: TStringList;
-  sp : String;
-begin
-  //Create string list.
-  sl := TStringList.Create;
-  //Clean up the compressed css file.
-  Buffer := Buffer.Replace('{', ' {' + sLineBreak, [rfReplaceAll]);
-  Buffer := Buffer.Replace('}', sLineBreak +  '}' + sLineBreak, [rfReplaceAll]);
-  Buffer := Buffer.Replace(';', ';' + sLineBreak , [rfReplaceAll]);
-  Buffer := Buffer.Replace('*/', '*/' + sLineBreak , [rfReplaceAll]);
-
-
-  if IndentSpaces > 0 then
-    sp := Spaces(IndentSpaces);
-
-  //Extract the string into the string list.
-  ExtractStrings([''#13'', ''#10''], [], PChar(Buffer), sl);
-  //Clear buffer.
-  Buffer := '';
-  //indent css propertie names add space between property and value.
-  for I := 0 to sl.Count - 1 do
-  begin
-    //Get line
-    StrLine := Trim(sl[I]);
-    //Check for : in string.
-    sPos := Pos(':', StrLine);
-    if sPos > 0 then
-    begin
-      //Check for end of line marker.
-{      if not StrLine.EndsWith(';') then
-      begin
-        //Add end marker.
-        StrLine := StrLine + ';';
-      end;  }
-      //Check for : in string.
-      sPos := Pos(':', StrLine);
-      //Check for : position.
-      if sPos > 0 then
-      begin
-        //Split the line in half.
-        StrTemp := Trim(Copy(StrLine, sPos + 1));
-        StrLine := Trim(Copy(StrLine, 1, sPos));
-        //Remake the line with the space included.
-        StrLine := StrLine + ' ' + StrTemp;
-      end;
-
-      //Check if indenting lines.
-      if IndentSpaces > 0 then
-      begin
-        //Indent the line.
-        StrLine := sp + StrLine;
-      end;
-    end;
-    //Check for { in string.
-    sPos := Pos('{', StrLine);
-    //Check for : position.
-    if sPos > 0 then
-    begin
-      //Split the line in half.
-      StrTemp := Trim(Copy(StrLine, sPos));
-      StrLine := Trim(Copy(StrLine, 1, sPos - 1));
-      //Remake the line with the space included.
-      StrLine := StrLine + ' ' + StrTemp;
-    end;
-    StrLine := RemakeCommas(StrLine);
-
-    //Just add an extra line break make css more readable.
-    if StrLine = '}' then
-    begin
-      //Append crlf to strline.
-      StrLine := StrLine + sLineBreak;
-    end;
-    //Build the output string.
-    Buffer := Buffer + StrLine + sLineBreak;
-  end;
-  Result := Buffer;
 end;
 
 end.
